@@ -105,6 +105,12 @@ h1,h2,h3,p{margin:0}
 .c0{background:#DBEAFE;color:#1D4ED8}
 .c1{background:#EEF1F6;color:#475569}
 .c2{background:#FEF3C7;color:#92400E}
+.c3{background:#DCFCE7;color:#166534}
+.qhead{list-style:none;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:var(--t2);padding:14px 0 2px}
+.qhead.inc{color:#B45309}
+.chip:disabled{opacity:.5}
+.ruleb{background:#EEF3FF;border-radius:16px;padding:12px 14px;font-size:13.5px;line-height:1.4;color:#1E3A8A;margin-bottom:12px;font-weight:600}
+.ruleb.warn{background:#FFF6DC;color:#92400E}
 button.pill{position:relative;transition:transform .15s}
 button.pill::before{content:"";position:absolute;inset:-10px -6px}
 button.pill:active{transform:scale(.94)}
@@ -167,7 +173,7 @@ button.pill:active{transform:scale(.94)}
 .qrow{display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}
 .qrow:last-child{border-bottom:0}
 .qn{width:34px;height:34px;border-radius:50%;background:var(--field);color:#475569;font-weight:800;font-size:14px;display:flex;align-items:center;justify-content:center;flex:none}
-.qrow:first-child .qn{background:var(--blue);color:#fff}
+.qrow.first .qn{background:var(--blue);color:#fff}
 
 /* ---------- Partida ---------- */
 .ringwrap{position:relative;width:250px;height:250px;margin:4px auto 0}
@@ -278,7 +284,8 @@ function saveCfg() { try { localStorage.setItem(CFG_KEY, JSON.stringify(S.cfg));
 const CATS = [
   { n: "Pagante", c: "c0" },
   { n: "Não pagante", c: "c1" },
-  { n: "Convidado", c: "c2" }
+  { n: "Convidado", c: "c2" },
+  { n: "Goleiro (isento)", c: "c3" }
 ];
 const VERSES = [
   ["Como é bom e agradável quando os irmãos vivem em união!", "Salmos 133:1"],
@@ -397,7 +404,7 @@ const S = {
   roster: loadRoster(),
   f: { name: "", gk: false, paid: false, gname: "", ggk: false },
   search: "", delId: null, showRules: false,
-  teams: null, queue: [], reasons: {}, notices: [], round: 1,
+  teams: null, queue: [], gkq: [], games: { A: 1, B: 1 }, reasons: {}, notices: [], round: 1,
   timeLeft: CFG0.minutes * 60000, running: false, started: false, endsAt: 0,
   scores: { A: 0, B: 0 }, finished: null, confirmReset: false,
   showMoment: false, verse: VERSES[0], suggestion: SUGGESTIONS[0],
@@ -408,7 +415,7 @@ let audioCtx = null;
 function players() {
   const m = monthKey();
   return S.roster.map(function (p) {
-    return Object.assign({}, p, { cat: p.kind === "guest" ? 2 : (p.paidMonth === m ? 0 : 1) });
+    return Object.assign({}, p, { cat: p.gk ? 3 : (p.kind === "guest" ? 2 : (p.paidMonth === m ? 0 : 1)) });
   });
 }
 function P(id) { return players().filter(function (p) { return p.id === id; })[0]; }
@@ -448,6 +455,15 @@ function rank(list) {
     .map(function (x) { return x.p; });
 }
 
+function rankStable(list) {
+  return list.map(function (p, i) { return { p: p, i: i }; })
+    .sort(function (a, b) { return a.p.cat - b.p.cat || b.p.waited - a.p.waited || a.i - b.i; })
+    .map(function (x) { return x.p; });
+}
+function orderQueue() {
+  S.queue = rankStable(S.queue.map(function (id) { return P(id); }).filter(Boolean)).map(function (p) { return p.id; });
+}
+
 /* ===================================================================
    SORTEIO
    - 2 goleiros (marcados) por prioridade; se faltar, linha vai ao gol
@@ -467,7 +483,9 @@ function drawTeams() {
   if (present.length < 2 * want) {
     warns.push({ type: "warn", text: "Apenas " + present.length + " presentes para times de " + want + ": os times ficaram com " + size + " jogadores cada." });
   }
-  let gks = ranked.filter(function (p) { return p.gk; }).slice(0, 2);
+  const gkAll = ranked.filter(function (p) { return p.gk; });
+  let gks = gkAll.slice(0, 2);
+  const gkWait = gkAll.slice(2);
   const lineGk = [];
   if (gks.length < 2) {
     const extra = ranked.filter(function (p) { return gks.indexOf(p) < 0; }).slice(0, 2 - gks.length);
@@ -475,7 +493,7 @@ function drawTeams() {
     gks = gks.concat(extra);
     warns.push({ type: "warn", text: 'Faltam goleiros: jogador(es) de linha foram para o gol (indicado como "linha no gol").' });
   }
-  const rest = ranked.filter(function (p) { return gks.indexOf(p) < 0; });
+  const rest = ranked.filter(function (p) { return gks.indexOf(p) < 0 && gkWait.indexOf(p) < 0; });
   const slots = 2 * (size - 1);
   const selected = rest.slice(0, slots);
   const waiting = rest.slice(slots);
@@ -485,8 +503,9 @@ function drawTeams() {
   selected.forEach(function (p, i) { (pattern[i % 4] === "A" ? A.line : B.line).push(p.id); });
 
   const why = {};
-  gks.forEach(function (p) { why[p.id] = lineGk.indexOf(p.id) >= 0 ? "Goleiro: linha no gol (faltaram goleiros)" : "Goleiro: " + CATS[p.cat].n; });
+  gks.forEach(function (p) { why[p.id] = lineGk.indexOf(p.id) >= 0 ? "Goleiro: linha no gol (faltaram goleiros)" : "Goleiro fixo na partida"; });
   selected.forEach(function (p) { why[p.id] = "Selecionado: " + CATS[p.cat].n; });
+  gkWait.forEach(function (p) { why[p.id] = "Goleiro na espera: entra quando o time dele sair"; });
   const cutoff = selected[selected.length - 1];
   waiting.forEach(function (p) {
     if (!cutoff || p.cat > cutoff.cat) why[p.id] = "Aguardando: vagas preenchidas por prioridade maior";
@@ -496,6 +515,8 @@ function drawTeams() {
 
   S.teams = { A: A, B: B, lineGk: lineGk };
   S.queue = waiting.map(function (p) { return p.id; });
+  S.gkq = gkWait.map(function (p) { return p.id; });
+  S.games = { A: 1, B: 1 };
   S.reasons = why;
   S.round = 1;
   resetMatch();
@@ -504,81 +525,166 @@ function drawTeams() {
 }
 
 function swapPlayer(k, id, isGk) {
-  if (!S.queue.length) { notice("warn", "A fila de espera está vazia."); return; }
-  let pick = S.queue[0];
-  if (isGk) pick = S.queue.filter(function (q) { const p = P(q); return p && p.gk; })[0] || S.queue[0];
+  let pick, fromGk = false;
+  if (isGk && S.gkq.length) { pick = S.gkq[0]; fromGk = true; }
+  else if (S.queue.length) pick = S.queue[0];
+  else { notice("warn", "A fila de espera está vazia."); return; }
   const t = S.teams[k];
   const nt = isGk ? Object.assign({}, t, { gk: pick }) : Object.assign({}, t, { line: t.line.map(function (x) { return x === id ? pick : x; }) });
   const lineGk = S.teams.lineGk.filter(function (x) { return x !== id; });
-  const pp = P(pick);
+  const pp = P(pick), old = P(id);
   if (isGk && pp && !pp.gk) lineGk.push(pick);
   S.teams[k] = nt;
   S.teams.lineGk = lineGk;
-  S.queue = S.queue.filter(function (q) { return q !== pick; }).concat([id]);
+  if (fromGk) S.gkq = S.gkq.slice(1); else S.queue = S.queue.slice(1);
+  if (old && old.gk) S.gkq = S.gkq.concat([id]); else S.queue = S.queue.concat([id]);
   S.reasons[pick] = "Entrou: troca manual";
   S.reasons[id] = "Aguardando: trocado manualmente";
 }
 
 /* ===================================================================
-   PRÓXIMA PARTIDA (fila)
-   - vencedor fica; quem estava na fila ganha +1 rodada de espera
-   - novo time: goleiro da fila (se houver) + jogadores por prioridade
-   - fila insuficiente: completa com o time que saiu
-   - time que saiu vai para o fim da fila com espera zerada
+   RODÍZIO DOS TIMES
+   - Quem perde sai. Time com 3 partidas seguidas também sai (mesmo ganhando),
+     desde que haja outro time completo esperando.
+   - Empate com um time de 3 partidas: com 1 time esperando, sai só o de 3 partidas;
+     com 2 ou mais esperando, saem os dois.
+   - Goleiros ficam fixos. Só há troca quando existe goleiro esperando.
    =================================================================== */
-function nextRound(out) {
-  const stay = out === "A" ? "B" : "A";
-  const size = 1 + S.teams[out].line.length;
-  const warns = [];
-  const outIds = [S.teams[out].gk].concat(S.teams[out].line);
-  const outPlayers = rank(outIds.map(function (id) { return P(id); }));
-  const pool = rank(S.queue.map(function (id) { const p = P(id); return Object.assign({}, p, { waited: p.waited + 1 }); }));
-
-  const newIds = [], newLineGk = [], why = {};
-  let gkP = pool.filter(function (p) { return p.gk; })[0];
-  if (!gkP && pool.length) {
-    gkP = pool[0]; newLineGk.push(gkP.id);
-    warns.push({ type: "warn", text: "Sem goleiro na fila: um jogador de linha foi para o gol." });
+function waitingTeams() {
+  const size = S.teams && S.teams.A.line.length;
+  return size ? Math.floor(S.queue.length / size) : 0;
+}
+function planRotation() {
+  const a = S.scores.A, b = S.scores.B, W = waitingTeams();
+  const gA = S.games.A, gB = S.games.B;
+  const loser = a < b ? "A" : b < a ? "B" : null;
+  const other = function (k) { return k === "A" ? "B" : "A"; };
+  const must = ["A", "B"].filter(function (k) { return S.games[k] >= 3; });
+  if (W >= 1 && must.length) {
+    if (must.length === 2) {
+      if (W >= 2) return { outs: ["A", "B"], text: "Os dois times jogaram 3 partidas seguidas e saem." };
+      return { outs: null, text: "Os dois times jogaram 3 partidas, mas só há um time esperando: o grupo decide quem sai." };
+    }
+    const m = must[0], o = other(m);
+    if (loser === null) {
+      return W >= 2
+        ? { outs: [m, o], text: "Empate. O Time " + m + " jogou 3 partidas seguidas e há " + W + " times esperando: os dois times saem." }
+        : { outs: [m], text: "Empate. O Time " + m + " jogou 3 partidas seguidas e sai. O Time " + o + " permanece." };
+    }
+    if (loser === m) return { outs: [m], text: "O Time " + m + " perdeu e também completou 3 partidas. Sai o Time " + m + "." };
+    return W >= 2
+      ? { outs: [m, o], text: "O Time " + m + " venceu, mas jogou 3 partidas seguidas e sai. O Time " + o + " perdeu e também sai." }
+      : { outs: [m], text: "O Time " + m + " venceu, mas jogou 3 partidas seguidas e sai. O Time " + o + " permanece (só há um time esperando)." };
   }
-  if (!gkP) {
-    gkP = outPlayers.filter(function (p) { return p.gk; })[0] || outPlayers[0];
-    if (!gkP.gk) newLineGk.push(gkP.id);
-    warns.push({ type: "warn", text: "Fila insuficiente: o goleiro veio do time que saiu." });
-  }
-  newIds.push(gkP.id);
-
-  const poolRest = pool.filter(function (p) { return p.id !== gkP.id; });
-  const outRest = outPlayers.filter(function (p) { return p.id !== gkP.id; });
+  if (loser) return { outs: [loser], text: "Sai quem perdeu." };
+  if (gA !== gB) { const k = gA > gB ? "A" : "B"; return { outs: [k], text: "Empate: sai o time que está há mais partidas (Time " + k + ")." }; }
+  return { outs: null, text: "Empate: o grupo decide qual time sai." };
+}
+function rotate(outs) {
+  const warns = [], why = {};
+  const oldQueue = S.queue.slice();
+  const pool = rankStable(oldQueue.map(function (id) { const p = P(id); return p ? Object.assign({}, p, { waited: p.waited + 1 }) : null; }).filter(Boolean));
+  const leaving = [], outIds = [];
+  outs.forEach(function (k) {
+    S.teams[k].line.forEach(function (id) { const p = P(id); if (p) leaving.push(Object.assign({}, p, { waited: 0 })); outIds.push(id); });
+    outIds.push(S.teams[k].gk);
+  });
+  const leavingR = rankStable(leaving);
   let usedOut = false;
-  while (newIds.length < size) {
-    let p;
-    if (poolRest.length) p = poolRest.shift();
-    else { p = outRest.shift(); usedOut = true; }
-    if (!p) break;
-    newIds.push(p.id);
-  }
+  const newLines = {};
+  outs.forEach(function (k) {
+    const need = S.teams[k].line.length, line = [];
+    while (line.length < need) {
+      let p = pool.shift();
+      if (!p) { p = leavingR.shift(); if (p) usedOut = true; }
+      if (!p) break;
+      line.push(p.id);
+    }
+    newLines[k] = line;
+  });
   if (usedOut) warns.push({ type: "warn", text: "Fila insuficiente: o novo time foi completado com jogadores do time que saiu." });
-
-  const newQueue = poolRest.map(function (p) { return p.id; }).concat(outRest.map(function (p) { return p.id; }));
-
-  const inQueue = S.queue.slice();
+  const newQueue = pool.map(function (p) { return p.id; }).concat(leavingR.map(function (p) { return p.id; }));
+  const gkq = S.gkq.slice();
+  let lineGk = S.teams.lineGk.slice();
+  outs.forEach(function (k) {
+    const t = S.teams[k];
+    let gk = t.gk;
+    if (gkq.length) {
+      const old = P(t.gk);
+      gk = gkq.shift();
+      if (old && old.gk) gkq.push(old.id); else if (old) newQueue.push(old.id);
+      lineGk = lineGk.filter(function (x) { return x !== t.gk; });
+      why[gk] = "Entrou: troca de goleiro";
+      why[t.gk] = old && old.gk ? "Goleiro na espera: entra quando o time dele sair" : "Aguardando: fim da fila";
+    }
+    S.teams[k] = { gk: gk, line: newLines[k] };
+  });
+  const entering = [];
+  outs.forEach(function (k) { entering.push(S.teams[k].gk); newLines[k].forEach(function (id) { entering.push(id); }); });
   S.roster = S.roster.map(function (p) {
-    if (newIds.indexOf(p.id) >= 0 || outIds.indexOf(p.id) >= 0) return Object.assign({}, p, { waited: 0 });
-    if (inQueue.indexOf(p.id) >= 0) return Object.assign({}, p, { waited: p.waited + 1 });
+    if (entering.indexOf(p.id) >= 0 || outIds.indexOf(p.id) >= 0) return Object.assign({}, p, { waited: 0 });
+    if (oldQueue.indexOf(p.id) >= 0) return Object.assign({}, p, { waited: p.waited + 1 });
     return p;
   });
-
-  newIds.forEach(function (id) { why[id] = "Entrou: prioridade da fila"; });
+  newLines && outs.forEach(function (k) { newLines[k].forEach(function (id) { why[id] = "Entrou: prioridade da fila"; }); });
   newQueue.forEach(function (id) { why[id] = outIds.indexOf(id) >= 0 ? "Aguardando: time que saiu, fim da fila" : "Aguardando: ordem de prioridade da fila"; });
-  S.teams[stay].line.concat([S.teams[stay].gk]).forEach(function (id) { why[id] = "Permanece: time vencedor"; });
-
-  S.teams[out] = { gk: newIds[0], line: newIds.slice(1) };
-  S.teams.lineGk = S.teams.lineGk.filter(function (x) { return outIds.indexOf(x) < 0; }).concat(newLineGk);
+  ["A", "B"].filter(function (k) { return outs.indexOf(k) < 0; }).forEach(function (k) {
+    S.teams[k].line.concat([S.teams[k].gk]).forEach(function (id) { why[id] = "Permanece em quadra"; });
+    S.games[k] += 1;
+  });
+  outs.forEach(function (k) { S.games[k] = 1; });
+  S.teams.lineGk = lineGk;
   S.queue = newQueue;
+  S.gkq = gkq;
+  orderQueue();
   Object.keys(why).forEach(function (k) { S.reasons[k] = why[k]; });
   S.round += 1;
   resetMatch();
   setNotices(warns);
+}
+
+/* ===================================================================
+   CHEGADAS TARDIAS E SAÍDAS (mantém fila e quadra em dia com a presença)
+   - Quem chega depois entra na fila, respeitando a prioridade
+   - Quem sai da lista de presentes deixa a fila; se estava em quadra, é substituído
+   =================================================================== */
+function reconcile() {
+  if (!S.teams) return;
+  const byId = {};
+  players().forEach(function (p) { byId[p.id] = p; });
+  const ok = function (id) { return !!(byId[id] && byId[id].present); };
+  const court = [];
+  ["A", "B"].forEach(function (k) { court.push(S.teams[k].gk); S.teams[k].line.forEach(function (x) { court.push(x); }); });
+  S.queue = S.queue.filter(ok);
+  S.gkq = S.gkq.filter(ok);
+  const known = {};
+  court.concat(S.queue, S.gkq).forEach(function (id) { known[id] = 1; });
+  const arrived = [];
+  players().forEach(function (p) {
+    if (!p.present || known[p.id]) return;
+    arrived.push(p.name);
+    S.roster = S.roster.map(function (x) { return x.id === p.id ? Object.assign({}, x, { waited: 0 }) : x; });
+    if (p.gk) S.gkq.push(p.id); else S.queue.push(p.id);
+    S.reasons[p.id] = "Chegou depois: entrou na fila pela prioridade";
+  });
+  orderQueue();
+  const subs = [];
+  ["A", "B"].forEach(function (k) {
+    const t = S.teams[k];
+    if (!ok(t.gk)) {
+      let nu = S.gkq.shift();
+      if (!nu && S.queue.length) { nu = S.queue.shift(); S.teams.lineGk.push(nu); }
+      if (nu) { subs.push(byId[t.gk] ? byId[t.gk].name : "goleiro"); t.gk = nu; S.reasons[nu] = "Entrou: substituiu quem saiu"; }
+    }
+    t.line = t.line.map(function (id) {
+      if (ok(id) || !S.queue.length) return id;
+      const nu = S.queue.shift();
+      subs.push(byId[id] ? byId[id].name : "jogador"); S.reasons[nu] = "Entrou: substituiu quem saiu";
+      return nu;
+    });
+  });
+  if (arrived.length) notice("info", (arrived.length === 1 ? arrived[0] + " chegou" : arrived.slice(0, 3).join(", ") + (arrived.length > 3 ? " e mais " + (arrived.length - 3) : "") + " chegaram") + " e entrou na fila de espera.");
+  if (subs.length) notice("warn", "Saiu da quadra: " + subs.join(", ") + ". Substituído pelo primeiro da fila.");
 }
 
 /* ---------- Partida ---------- */
@@ -749,9 +855,10 @@ function viewPresenca() {
     '<div class="stats"><div class="stat s0"><b>' + cnt(0) + "</b><span>Pagantes</span></div>" +
     '<div class="stat s1"><b>' + cnt(1) + "</b><span>Não pagantes</span></div>" +
     '<div class="stat s2"><b>' + cnt(2) + "</b><span>Convidados</span></div></div>" +
+    (cnt(3) ? '<p class="muted" style="margin-top:10px">+ ' + cnt(3) + (cnt(3) === 1 ? " goleiro" : " goleiros") + " (isentos de mensalidade)</p>" : "") +
     '<div class="sep" style="margin-top:14px"></div>' +
     '<button class="link' + (S.showRules ? " open" : "") + '" data-act="rules" aria-expanded="' + S.showRules + '">Como funciona a prioridade?' + ic("down") + "</button>" +
-    (S.showRules ? '<div class="rules muted"><p>1. Entram primeiro os Pagantes (mensalidade do mês em dia), depois os Não pagantes e por último os Convidados.</p><p>2. Na mesma categoria, entra primeiro quem esperou mais rodadas.</p><p>3. Se ainda houver empate, um sorteio decide.</p></div>' : "") +
+    (S.showRules ? '<div class="rules muted"><p>1. Entram primeiro os Pagantes (mensalidade do mês em dia), depois os Não pagantes e por último os Convidados.</p><p>2. Na mesma categoria, entra primeiro quem esperou mais rodadas.</p><p>3. Se ainda houver empate, um sorteio decide.</p><p>4. Goleiros são isentos de mensalidade e ficam fixos nas partidas. Com mais de 2 goleiros, o goleiro do time que sai troca com o que está esperando.</p><p>5. Quem chega atrasado entra na fila, respeitando a prioridade.</p><p>6. Um time que jogou 3 partidas seguidas sai, mesmo vencendo, se houver outro time completo esperando. Em empate: com 1 time esperando sai só o de 3 partidas; com 2 ou mais esperando, saem os dois.</p></div>' : "") +
     "</section>" +
 
     sorteioCard(false) +
@@ -775,19 +882,20 @@ function viewPresenca() {
 function viewMembros() {
   const members = players().filter(function (p) { return p.kind === "member"; })
     .sort(function (a, b) { return a.name.localeCompare(b.name, "pt-BR"); });
-  const paid = members.filter(function (p) { return p.cat === 0; }).length;
-  const pct = members.length ? Math.round(paid / members.length * 100) : 0;
+  const payers = members.filter(function (p) { return !p.gk; });
+  const paid = payers.filter(function (p) { return p.cat === 0; }).length;
+  const pct = payers.length ? Math.round(paid / payers.length * 100) : 0;
   const rows = members.map(function (p) {
-    return '<li class="mrow">' + avatar(p.name) + '<div class="grow"><div class="nm">' + esc(p.name) + '</div><div class="meta">' + badge(p.cat, p.id) + "</div></div>" +
+    return '<li class="mrow">' + avatar(p.name) + '<div class="grow"><div class="nm">' + esc(p.name) + '</div><div class="meta">' + (p.gk ? badge(3) : badge(p.cat, p.id)) + "</div></div>" +
       (S.delId === p.id
         ? '<button class="btn dng sm" data-act="delOk" data-id="' + p.id + '" aria-label="Confirmar exclusão de ' + esc(p.name) + '">Excluir</button><button class="icb" data-act="delNo" aria-label="Cancelar exclusão">' + ic("x") + "</button>"
         : '<button class="icb' + (p.gk ? " on" : "") + '" data-act="gk" data-id="' + p.id + '" aria-pressed="' + p.gk + '" aria-label="Goleiro: ' + esc(p.name) + '">' + ic("shield") + "</button>" +
           '<button class="icb del" data-act="delAsk" data-id="' + p.id + '" aria-label="Remover ' + esc(p.name) + '">' + ic("trash") + "</button>") +
       "</li>";
   }).join("");
-  return '<section class="card"><div class="split"><div><p class="lab">Mensalidade · ' + esc(monthLabel()) + '</p><p class="big">' + paid + " <span>de " + members.length + " pagos</span></p></div>" + tile("wallet", "blue", true) + "</div>" +
+  return '<section class="card"><div class="split"><div><p class="lab">Mensalidade · ' + esc(monthLabel()) + '</p><p class="big">' + paid + " <span>de " + payers.length + " pagos</span></p></div>" + tile("wallet", "blue", true) + "</div>" +
     '<div class="track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><i style="width:' + pct + '%"></i></div>' +
-    '<p class="muted" style="margin-top:12px">Toque no selo de um membro para marcar quem pagou. No dia 1º do próximo mês todos voltam a "Não pagante".</p></section>' +
+    '<p class="muted" style="margin-top:12px">Toque no selo de um membro para marcar quem pagou. No dia 1º do próximo mês todos voltam a "Não pagante". Goleiros são isentos.</p></section>' +
 
     '<section class="card"><div class="split"><h2 class="ttl">Sincronização</h2>' + tile("cloud", "gray") + "</div>" +
     '<div class="syrow"><span class="sdot ' + S.sync.state + '"></span><span>' + esc(syLabel()) + "</span></div>" +
@@ -797,7 +905,7 @@ function viewMembros() {
     '<section class="card stack"><div class="split"><h2 class="ttl">Novo membro</h2>' + tile("userplus", "blue") + "</div>" +
     '<input class="inp" id="name" data-bind="name" data-enter="addMember" placeholder="Nome" value="' + esc(S.f.name) + '" autocomplete="off" aria-label="Nome do membro">' +
     '<div class="chips"><button class="chip" data-act="fGk" aria-pressed="' + S.f.gk + '">' + ic("shield", "i16") + 'Goleiro</button>' +
-    '<button class="chip" data-act="fPaid" aria-pressed="' + S.f.paid + '">' + ic("check", "i16") + "Já pagou</button></div>" +
+    (S.f.gk ? '<button class="chip" disabled aria-pressed="false">' + ic("check", "i16") + "Goleiro é isento</button></div>" : '<button class="chip" data-act="fPaid" aria-pressed="' + S.f.paid + '">' + ic("check", "i16") + "Já pagou</button></div>") +
     '<button class="btn pri full" data-act="addMember">' + ic("plus") + " Adicionar</button></section>" +
 
     '<section class="card"><div class="split" style="margin-bottom:6px"><h2 class="ttl">Membros (' + members.length + ")</h2>" + tile("users", "gray") + "</div>" +
@@ -826,7 +934,7 @@ function lineRow(id, k) {
 }
 function teamCard(k) {
   const t = S.teams[k];
-  return '<section class="team ' + k + '"><div class="strip"><h3>Time ' + k + '</h3><span class="cn">' + (1 + t.line.length) + ' jogadores</span></div>' +
+  return '<section class="team ' + k + '"><div class="strip"><h3>Time ' + k + '</h3><span class="cn">' + (1 + t.line.length) + ' jogadores · ' + S.games[k] + 'ª partida</span></div>' +
     '<div class="tbody"><p class="lab">Goleiro</p>' + gkBlock(t.gk, k) + '<p class="lab" style="margin-top:16px">Linha</p><ul>' +
     t.line.map(function (id) { return lineRow(id, k); }).join("") + "</ul></div></section>";
 }
@@ -834,15 +942,33 @@ function viewTimes() {
   if (!S.teams) {
     return '<section class="card">' + emptyState("shuffle", "Os times ainda não foram sorteados. Marque a presença e sorteie.", '<button class="btn pri" data-act="draw">' + ic("shuffle") + " Sortear times</button>") + "</section>";
   }
+  const lineSize = S.teams.A.line.length || 1;
   const q = S.queue.map(function (id, i) {
     const p = P(id);
     if (!p) return "";
-    return '<li class="qrow"><span class="qn">' + (i + 1) + 'º</span><div class="grow"><div class="split" style="justify-content:flex-start;gap:10px"><span class="nm">' + esc(p.name) + "</span>" + badge(p.cat) + "</div>" +
+    let head = "";
+    if (i % lineSize === 0) {
+      const left = S.queue.length - i, blk = i / lineSize + 1;
+      head = left >= lineSize
+        ? '<li class="qhead">' + (blk === 1 ? "Próximo time a entrar" : blk + "º time a entrar") + "</li>"
+        : '<li class="qhead inc">Time incompleto (faltam ' + (lineSize - left) + ")</li>";
+    }
+    return head + '<li class="qrow' + (i === 0 ? " first" : "") + '"><span class="qn">' + (i + 1) + 'º</span><div class="grow"><div class="split" style="justify-content:flex-start;gap:10px"><span class="nm">' + esc(p.name) + "</span>" + badge(p.cat) + "</div>" +
       (S.reasons[id] ? '<div class="why">' + esc(S.reasons[id]) + "</div>" : "") + "</div></li>";
   }).join("");
-  return teamCard("A") + teamCard("B") +
+  const gq = S.gkq.map(function (id, i) {
+    const p = P(id);
+    return p ? '<li class="qrow"><span class="qn">' + (i + 1) + 'º</span><div class="grow"><div class="split" style="justify-content:flex-start;gap:10px"><span class="nm">' + esc(p.name) + '</span><span class="pill c3">Goleiro</span></div></div></li>' : "";
+  }).join("");
+  const W = waitingTeams();
+  const must = ["A", "B"].filter(function (k) { return S.games[k] >= 3; });
+  const hint = must.length && W >= 1
+    ? '<div class="ruleb warn">O Time ' + must.join(" e Time ") + " já jogou 3 partidas seguidas e sai ao fim da partida, mesmo se vencer.</div>"
+    : '<div class="ruleb">' + (W >= 1 ? W + (W === 1 ? " time completo espera" : " times completos esperam") + ". Quem perde sai; com 3 partidas seguidas, o time também sai." : "Ainda não há um time completo esperando: quem perde sai e a fila completa o time.") + "</div>";
+  return hint + teamCard("A") + teamCard("B") +
     '<section class="card"><div class="split" style="margin-bottom:4px"><h2 class="ttl">Fila de espera (' + S.queue.length + ")</h2>" + tile("clock", "gray") + "</div>" +
     (S.queue.length === 0 ? '<p class="muted" style="padding:10px 0">Ninguém na fila.</p>' : "<ol>" + q + "</ol>") + "</section>" +
+    (S.gkq.length ? '<section class="card"><div class="split" style="margin-bottom:4px"><h2 class="ttl">Goleiros esperando (' + S.gkq.length + ')</h2>' + tile("shield", "gray") + '</div><p class="muted">O goleiro do time que sair troca com o primeiro daqui.</p><ol>' + gq + "</ol></section>" : "") +
     sorteioCard(true);
 }
 
@@ -863,7 +989,7 @@ function viewPartida() {
           (S.started ? '<button class="btn sec sm" data-act="endNow">' + ic("flag", "i16") + " Encerrar</button>" : "")) + "</div>";
   }
   const score = ["A", "B"].map(function (k) {
-    return '<section class="sc ' + k + '"><div class="strip"><h3>Time ' + k + '</h3></div><div class="scb"><div class="num" aria-live="polite" aria-label="Time ' + k + ": " + S.scores[k] + ' gols">' + S.scores[k] + "</div>" +
+    return '<section class="sc ' + k + '"><div class="strip"><h3>Time ' + k + '</h3><span class="cn">' + S.games[k] + 'ª partida</span></div><div class="scb"><div class="num" aria-live="polite" aria-label="Time ' + k + ": " + S.scores[k] + ' gols">' + S.scores[k] + "</div>" +
       '<button class="btn ' + (k === "A" ? "pri" : "dng") + ' full golb" data-act="goal" data-k="' + k + '"' + (S.finished ? " disabled" : "") + ">+ GOL</button>" +
       '<button class="undo" data-act="undo" data-k="' + k + '"' + (S.finished || S.scores[k] === 0 ? " disabled" : "") + ' aria-label="Desfazer gol do Time ' + k + '">desfazer</button></div></section>';
   }).join("");
@@ -876,15 +1002,18 @@ function viewPartida() {
 }
 
 function finishSheet() {
-  const sugOut = S.scores.A === S.scores.B ? null : (S.scores.A < S.scores.B ? "A" : "B");
+  const plan = planRotation(), W = waitingTeams();
+  const sug = plan.outs ? plan.outs.join("") : null;
+  const lab = { A: "Time A sai", B: "Time B sai", AB: "Os dois saem" };
+  const keys = W >= 2 || sug === "AB" ? ["A", "B", "AB"] : ["A", "B"];
   return '<div class="scrim' + '"></div><section class="bsheet' + (S.sheetFresh ? " enter" : "") + '" role="dialog" aria-modal="true" aria-label="Fim de jogo">' +
     '<div class="grab"></div><div class="fimh">' + tile("alert", "red") + '<div><h2>Fim de jogo!</h2><p class="muted">' + esc(S.finished.reason) + "</p></div></div>" +
     '<div class="final"><b class="a">' + S.scores.A + "</b><em>x</em><b class=\"b\">" + S.scores.B + "</b></div>" +
     '<p class="lab" style="text-align:center;margin-top:6px">Time A · Time B</p>' +
     '<h3 class="ttl" style="margin-top:20px">Qual time sai?</h3>' +
-    (!sugOut ? '<p class="muted" style="margin-top:4px">Empate: o grupo decide qual time sai.</p>' : '<p class="muted" style="margin-top:4px">Sugerimos que saia quem perdeu.</p>') +
-    '<div class="opts" style="margin-top:' + (sugOut ? "20px" : "14px") + '">' + ["A", "B"].map(function (k) {
-      return '<button class="opt ' + k + (sugOut === k ? " sug" : "") + '" data-act="out" data-k="' + k + '"><span>Time ' + k + " sai</span>" + (sugOut === k ? "<small>Sugerido</small>" : "") + "</button>";
+    '<p class="muted" style="margin-top:4px">' + esc(plan.text) + "</p>" +
+    '<div class="opts" style="margin-top:20px">' + keys.map(function (k) {
+      return '<button class="opt ' + (k === "AB" ? "A" : k) + (sug === k ? " sug" : "") + '"' + (k === "AB" ? ' style="grid-column:1/-1;background:var(--ink)"' : "") + ' data-act="out" data-k="' + k + '"><span>' + lab[k] + "</span>" + (sug === k ? "<small>Pelas regras</small>" : "") + "</button>";
     }).join("") + "</div></section>";
 }
 
@@ -1105,7 +1234,7 @@ const ACTS = {
   present: function (d) { const p = S.roster.filter(function (x) { return x.id === d.id; })[0]; updRoster(d.id, { present: !p.present }); },
   allOn: function () { S.roster = S.roster.map(function (p) { return Object.assign({}, p, { present: true }); }); },
   allOff: function () { S.roster = S.roster.map(function (p) { return Object.assign({}, p, { present: false }); }); },
-  fGk: function () { S.f.gk = !S.f.gk; },
+  fGk: function () { S.f.gk = !S.f.gk; if (S.f.gk) S.f.paid = false; },
   fPaid: function () { S.f.paid = !S.f.paid; },
   fGGk: function () { S.f.ggk = !S.f.ggk; },
   addGuest: function () {
@@ -1117,7 +1246,7 @@ const ACTS = {
   clearGuests: function () { S.roster = S.roster.filter(function (p) { return p.kind !== "guest"; }); },
   addMember: function () {
     const n = S.f.name.trim(); if (!n) return;
-    S.roster.push({ id: uid(), name: n, gk: S.f.gk, present: false, waited: 0, kind: "member", paidMonth: S.f.paid ? monthKey() : "", u: Date.now() });
+    S.roster.push({ id: uid(), name: n, gk: S.f.gk, present: false, waited: 0, kind: "member", paidMonth: (S.f.paid && !S.f.gk) ? monthKey() : "", u: Date.now() });
     syncSoon();
     S.f.name = ""; S.f.gk = false; S.f.paid = false;
     S.pendingFocus = "name";
@@ -1148,11 +1277,12 @@ const ACTS = {
   goal: function (d) { goal(d.k, 1); },
   undo: function (d) { goal(d.k, -1); },
   endNow: function () { finish("Partida encerrada manualmente."); },
-  out: function (d) { nextRound(d.k); S.tabFresh = true; }
+  out: function (d) { rotate(String(d.k).split("")); S.tabFresh = true; }
 };
 function act(name, d) {
   if (!ACTS[name]) return;
   ACTS[name](d || {});
+  reconcile();
   render();
 }
 

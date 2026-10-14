@@ -1,7 +1,7 @@
 /* Service worker do Fut com Cristo.
    Rede primeiro (pega atualizações quando há internet) e cache como reserva (funciona offline).
    Ao publicar uma nova versão, troque o número em CACHE para limpar o cache antigo. */
-const CACHE = "futcomcristo-v2";
+const CACHE = "futcomcristo-v3";
 const ARQUIVOS = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", (e) => {
