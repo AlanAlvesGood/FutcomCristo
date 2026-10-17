@@ -704,10 +704,11 @@ function notice(type, text) {
 
 /* ---------------------------------------------------------------------
    PRIORIDADE
-   Nível 1: Pagantes (prioridade absoluta)
+   Sorteio inicial: pagantes têm prioridade.
    Nível 2: Não pagantes e Convidados, juntos e sem preferência entre si
    Dentro do mesmo nível: 1) menos partidas no dia  2) mais rodadas esperando  3) sorteio
-   Um convidado ou não pagante nunca passa na frente de um pagante.
+   No rodízio, a fila é por ordem de entrada. Quem sai ou chega depois vai ao fim.
+   A prioridade inicial não permite ultrapassar quem já está esperando.
    --------------------------------------------------------------------- */
 function tier(p) { return p.cat === 1 || p.cat === 2 ? 1 : 0; }
 function cmpPrio(a, b) {
@@ -734,7 +735,7 @@ function rankStable(list) {
    equilibrando quantos de cada tipo ficam em cada time. */
 function mixSplit(list, caps) {
   const keys = Object.keys(caps), out = {}, cnt = {};
-  keys.forEach(function (k) { out[k] = []; cnt[k] = { n: 0, g: 0, p: 0 }; });
+  keys.forEach(function (k) { out[k] = []; cnt[k] = { n: 0, g: 0, p: 0, np: 0 }; });
   const room = function (k) { return caps[k] - out[k].length; };
   const pay = list.filter(function (p) { return tier(p) === 0; });
   const nonp = shuffle(list.filter(function (p) { return p.cat === 1; }));
@@ -757,36 +758,41 @@ function mixSplit(list, caps) {
   // alterna convidado/não pagante para espalhar os dois tipos nos dois times
   const mixed = [];
   for (let i = 0; i < Math.max(nonp.length, gst.length); i++) {
-    if (i < nonp.length) mixed.push([nonp[i], "n"]);
+    if (i < nonp.length) mixed.push([nonp[i], "np"]);
     if (i < gst.length) mixed.push([gst[i], "g"]);
   }
   mixed.forEach(function (x) { put(x[0], x[1]); });
   return out;
 }
 function orderQueue() {
-  S.queue = rankStable(S.queue.map(function (id) { return P(id); }).filter(Boolean)).map(function (p) { return p.id; });
+  // Preserva a ordem da fila. Não reaplica a prioridade do sorteio no rodízio.
+  const seen = new Set();
+  S.queue = S.queue.filter(function (id) {
+    const p = P(id);
+    if (!p || !p.present || p.gk || seen.has(id)) return false;
+    seen.add(id); return true;
+  });
 }
 
-/* ===================================================================
-   SORTEIO
-   - 2 goleiros (marcados) por prioridade; se faltar, linha vai ao gol
-   - vagas de linha: pagantes primeiro (A,B,B,A); depois não pagantes e convidados misturados entre os times
-   =================================================================== */
+/* Sorteio inicial: prioridade de mensalidade e distribuição entre os times. */
 function drawTeams() {
   S.notices = [];
-  // novo sorteio = jogo novo: zera partidas e espera (estado local do dia, nunca vem da nuvem)
-  S.roster = S.roster.map(function (p) { return Object.assign({}, p, { played: 0, waited: 0 }); });
-  const present = players().filter(function (p) { return p.present; });
-  if (present.length < 4) {
-    setNotices([{ type: "error", text: "São necessários pelo menos 4 jogadores presentes para sortear os times." }]);
+  let present = players().filter(function (p) { return p.present; });
+  // Goleiros reservas não contam como jogadores de linha disponíveis.
+  const available = present.filter(function (p) { return !p.gk; }).length + Math.min(2, present.filter(function (p) { return p.gk; }).length);
+  if (available < 4) {
+    setNotices([{ type: "error", text: "São necessários pelo menos 4 jogadores disponíveis, incluindo 2 jogadores de linha. Goleiros reservas não preenchem vagas de linha." }]);
     return false;
   }
+  // Só reinicia o histórico depois de validar o novo sorteio.
+  S.roster = S.roster.map(function (p) { return Object.assign({}, p, { played: 0, waited: 0 }); });
+  present = players().filter(function (p) { return p.present; });
   const warns = [];
   const ranked = rank(present);
   const want = S.cfg.size; // jogadores por time (com goleiro), definido na hora
-  const size = present.length >= 2 * want ? want : Math.max(2, Math.floor(present.length / 2));
-  if (present.length < 2 * want) {
-    warns.push({ type: "warn", text: "Apenas " + present.length + " presentes para times de " + want + ": os times ficaram com " + size + " jogadores cada." });
+  const size = Math.min(want, Math.floor(available / 2));
+  if (available < 2 * want) {
+    warns.push({ type: "warn", text: "Apenas " + available + " disponíveis (sem contar goleiros reservas) para times de " + want + ": os times ficaram com " + size + " jogadores cada." });
   }
   const gkAll = ranked.filter(function (p) { return p.gk; });
   let gks = gkAll.slice(0, 2);
@@ -889,36 +895,51 @@ function planRotation() {
 }
 function entryPlan(outs) {
   const court = [];
-  ["A", "B"].forEach(function (k) { court.push(S.teams[k].gk); S.teams[k].line.forEach(function (x) { court.push(x); }); });
-  const bump = function (id) { const p = P(id); return p ? Object.assign({}, p, { played: (p.played || 0) + (court.indexOf(id) >= 0 ? 1 : 0) }) : null; };
-  const pool = rankStable(S.queue.map(function (id) { const p = bump(id); return p ? Object.assign(p, { waited: (p.waited || 0) + 1 }) : null; }).filter(Boolean));
-  const leaving = [];
-  outs.forEach(function (k) { S.teams[k].line.forEach(function (id) { const p = bump(id); if (p) leaving.push(Object.assign(p, { waited: 0 })); }); });
+  ["A", "B"].forEach(function (k) { court.push(S.teams[k].gk); S.teams[k].line.forEach(function (id) { if (id) court.push(id); }); });
+  const valid = function (id) { const p = P(id); return p && p.present ? p : null; };
+  const pool = S.queue.map(valid).filter(function (p) { return p && !p.gk; });
+  const leaving = [], leavingGks = [];
+  outs.forEach(function (k) {
+    S.teams[k].line.forEach(function (id) {
+      const p = valid(id);
+      if (p) (p.gk ? leavingGks : leaving).push(p);
+    });
+  });
+  // Só reaproveita quem estava em quadra quando toda a fila já foi atendida.
   const leavingR = rankStable(leaving);
   let usedOut = false;
-  const caps = {};
-  let total = 0;
-  outs.forEach(function (k) { caps[k] = S.teams[k].line.length; total += caps[k]; });
-  const picks = [];
-  while (picks.length < total) {
-    let p = pool.shift();
-    if (!p) { p = leavingR.shift(); if (p) usedOut = true; }
-    if (!p) break;
-    picks.push(p);
-  }
-  const newLines = mixSplit(picks, caps);
-  return { pool: pool, leavingR: leavingR, newLines: newLines, usedOut: usedOut, court: court };
+  const newLines = {};
+  outs.forEach(function (k) {
+    newLines[k] = S.teams[k].line.map(function () {
+      let p = pool.shift();
+      if (!p) { p = leavingR.shift(); if (p) usedOut = true; }
+      return p ? p.id : null;
+    });
+  });
+  // A prévia e a confirmação usam exatamente o mesmo plano, sem novo sorteio.
+  // Goleiros que saem só voltam à fila após todas as entradas desta rodada.
+  const availableGks = S.gkq.filter(function (id) { const p = valid(id); return p && p.gk; });
+  const outgoingGks = [], newGoalies = {}, returningLine = [];
+  outs.forEach(function (k) {
+    const old = valid(S.teams[k].gk);
+    const next = availableGks.shift();
+    newGoalies[k] = next || (old ? old.id : null);
+    if (next && old) {
+      if (old.gk) outgoingGks.push(old.id); else returningLine.push(old.id);
+    }
+  });
+  return { pool: pool, leavingR: leavingR, newLines: newLines, usedOut: usedOut, court: court,
+    newGoalies: newGoalies, gkq: availableGks.concat(outgoingGks, leavingGks.map(function (p) { return p.id; })), returningLine: returningLine };
 }
 function previewEntry(outs) {
-  const ep = entryPlan(outs), gkq = S.gkq.slice();
+  const ep = entryPlan(outs);
+  const nm = function (id) { const p = P(id); return p ? p.name : "Vaga aberta"; };
   return outs.map(function (k) {
-    const t = S.teams[k]; let gk = t.gk, trocou = false;
-    if (gkq.length) { gk = gkq.shift(); trocou = true; }
-    const nm = function (id) { const p = P(id); return p ? p.name : "?"; };
-    return { k: k, gk: nm(gk), trocou: trocou, line: ep.newLines[k].map(nm) };
+    return { k: k, gk: nm(ep.newGoalies[k]), trocou: ep.newGoalies[k] !== S.teams[k].gk, line: ep.newLines[k].map(nm) };
   });
 }
 function rotate(outs) {
+  if (!S.teams || !S.finished || !outs.length || outs.some(function (k) { return k !== "A" && k !== "B"; }) || new Set(outs).size !== outs.length) return;
   const warns = [], why = {};
   const oldQueue = S.queue.slice();
   const ep = entryPlan(outs);
@@ -927,21 +948,15 @@ function rotate(outs) {
   const newLines = ep.newLines;
   if (ep.usedOut) warns.push({ type: "warn", text: "Fila insuficiente: o novo time foi completado com jogadores do time que saiu." });
   const newQueue = ep.pool.map(function (p) { return p.id; }).concat(ep.leavingR.map(function (p) { return p.id; }));
-  const gkq = S.gkq.slice();
-  let lineGk = S.teams.lineGk.slice();
+  const gkq = ep.gkq;
+  newQueue.push.apply(newQueue, ep.returningLine);
   outs.forEach(function (k) {
-    const t = S.teams[k];
-    let gk = t.gk;
-    if (gkq.length) {
-      const old = P(t.gk);
-      gk = gkq.shift();
-      if (old && old.gk) gkq.push(old.id); else if (old) newQueue.push(old.id);
-      lineGk = lineGk.filter(function (x) { return x !== t.gk; });
-      why[gk] = "Entrou: troca de goleiro";
-      why[t.gk] = old && old.gk ? "Goleiro na espera: entra quando o time dele sair" : "Aguardando: fim da fila";
-    }
+    const old = S.teams[k].gk, gk = ep.newGoalies[k];
+    if (gk && gk !== old) why[gk] = "Entrou: troca de goleiro";
+    if (old && gk !== old) why[old] = "Aguardando: fim da fila";
     S.teams[k] = { gk: gk, line: newLines[k] };
   });
+  const lineGk = [S.teams.A.gk, S.teams.B.gk].filter(function (id) { const p = P(id); return p && !p.gk; });
   const entering = [];
   outs.forEach(function (k) { entering.push(S.teams[k].gk); newLines[k].forEach(function (id) { entering.push(id); }); });
   S.roster = S.roster.map(function (p) {
@@ -950,8 +965,8 @@ function rotate(outs) {
     if (oldQueue.indexOf(p.id) >= 0) return Object.assign({}, base, { waited: (p.waited || 0) + 1 });
     return base;
   });
-  outs.forEach(function (k) { newLines[k].forEach(function (id) { why[id] = "Entrou: pagantes primeiro, depois quem jogou menos"; }); });
-  newQueue.forEach(function (id) { why[id] = outIds.indexOf(id) >= 0 ? "Aguardando: time que saiu, vai para o fim" : "Aguardando: ordem de prioridade da fila"; });
+  outs.forEach(function (k) { newLines[k].forEach(function (id) { why[id] = "Entrou: ordem da fila de espera"; }); });
+  newQueue.forEach(function (id) { why[id] = outIds.indexOf(id) >= 0 ? "Aguardando: time que saiu, vai para o fim" : "Aguardando: ordem de entrada na fila"; });
   ["A", "B"].filter(function (k) { return outs.indexOf(k) < 0; }).forEach(function (k) {
     S.teams[k].line.concat([S.teams[k].gk]).forEach(function (id) { why[id] = "Permanece em quadra"; });
     S.games[k] += 1;
@@ -969,7 +984,7 @@ function rotate(outs) {
 
 /* ===================================================================
    CHEGADAS TARDIAS E SAÍDAS (mantém fila e quadra em dia com a presença)
-   - Quem chega depois entra na fila, respeitando a prioridade
+   - Quem chega depois entra no fim da fila
    - Quem sai da lista de presentes deixa a fila; se estava em quadra, é substituído
    =================================================================== */
 function reconcile() {
@@ -977,38 +992,49 @@ function reconcile() {
   const byId = {};
   players().forEach(function (p) { byId[p.id] = p; });
   const ok = function (id) { return !!(byId[id] && byId[id].present); };
-  const court = [];
-  ["A", "B"].forEach(function (k) { court.push(S.teams[k].gk); S.teams[k].line.forEach(function (x) { court.push(x); }); });
-  S.queue = S.queue.filter(ok);
-  S.gkq = S.gkq.filter(ok);
-  const known = {};
-  court.concat(S.queue, S.gkq).forEach(function (id) { known[id] = 1; });
+  const seen = new Set(), departed = [];
+  // Mantém vagas explícitas quando alguém sai e não há substituto.
+  ["A", "B"].forEach(function (k) {
+    const keep = function (id) {
+      if (!ok(id) || seen.has(id)) {
+        if (id) departed.push(byId[id] ? byId[id].name : "jogador removido");
+        return null;
+      }
+      seen.add(id); return id;
+    };
+    S.teams[k].gk = keep(S.teams[k].gk);
+    S.teams[k].line = S.teams[k].line.map(keep);
+  });
+  const line = [], gks = [], movedLine = [], movedGks = [];
+  S.queue.concat(S.gkq).forEach(function (id) {
+    if (!ok(id) || seen.has(id)) return;
+    seen.add(id);
+    const p = byId[id], wasLine = S.queue.indexOf(id) >= 0;
+    if (p.gk) (wasLine ? movedGks : gks).push(id);
+    else (wasLine ? line : movedLine).push(id);
+  });
+  S.queue = line.concat(movedLine); S.gkq = gks.concat(movedGks);
   const arrived = [];
   players().forEach(function (p) {
-    if (!p.present || known[p.id]) return;
-    arrived.push(p.name);
-    S.roster = S.roster.map(function (x) { return x.id === p.id ? Object.assign({}, x, { waited: 0 }) : x; });
-    if (p.gk) S.gkq.push(p.id); else S.queue.push(p.id);
-    S.reasons[p.id] = "Chegou depois: entrou na fila pela prioridade";
+    if (!p.present || seen.has(p.id)) return;
+    seen.add(p.id); arrived.push(p.name);
+    updRoster(p.id, { waited: 0 });
+    (p.gk ? S.gkq : S.queue).push(p.id);
+    S.reasons[p.id] = "Chegou depois: fim da fila";
   });
-  orderQueue();
-  const subs = [];
+  // Primeiro preenche os gols, depois as vagas de linha.
   ["A", "B"].forEach(function (k) {
     const t = S.teams[k];
-    if (!ok(t.gk)) {
-      let nu = S.gkq.shift();
-      if (!nu && S.queue.length) { nu = S.queue.shift(); S.teams.lineGk.push(nu); }
-      if (nu) { subs.push(byId[t.gk] ? byId[t.gk].name : "goleiro"); t.gk = nu; S.reasons[nu] = "Entrou: substituiu quem saiu"; }
-    }
-    t.line = t.line.map(function (id) {
-      if (ok(id) || !S.queue.length) return id;
-      const nu = S.queue.shift();
-      subs.push(byId[id] ? byId[id].name : "jogador"); S.reasons[nu] = "Entrou: substituiu quem saiu";
-      return nu;
-    });
+    if (!t.gk) t.gk = S.gkq.shift() || S.queue.shift() || null;
   });
-  if (arrived.length) notice("info", (arrived.length === 1 ? arrived[0] + " chegou" : arrived.slice(0, 3).join(", ") + (arrived.length > 3 ? " e mais " + (arrived.length - 3) : "") + " chegaram") + " e entrou na fila de espera.");
-  if (subs.length) notice("warn", "Saiu da quadra: " + subs.join(", ") + ". Substituído pelo primeiro da fila.");
+  ["A", "B"].forEach(function (k) {
+    S.teams[k].line = S.teams[k].line.map(function (id) { return id || S.queue.shift() || null; });
+  });
+  S.teams.lineGk = [S.teams.A.gk, S.teams.B.gk].filter(function (id) { return ok(id) && !byId[id].gk; });
+  const incomplete = ["A", "B"].some(function (k) { const t = S.teams[k]; return !t.gk || t.line.some(function (id) { return !id; }); });
+  if (incomplete && S.running) pauseTimer();
+  if (arrived.length) notice("info", arrived.join(", ") + ": entrada registrada; vagas preenchidas ou fim da fila.");
+  if (departed.length) notice("warn", "Saiu da quadra: " + departed.join(", ") + (incomplete ? ". Há vaga aberta. Complete os times ou refaça o sorteio com os presentes." : ". Substituição feita pela fila."));
 }
 
 /* ---------- Partida ---------- */
@@ -1049,6 +1075,10 @@ function finish(reason) {
   render();
 }
 function startTimer() {
+  if (!S.teams || S.finished) return;
+  if (["A", "B"].some(function (k) { const t = S.teams[k]; return !t.gk || t.line.some(function (id) { return !id; }); })) {
+    notice("warn", "Há vaga aberta. Complete os times ou refaça o sorteio antes de iniciar."); return;
+  }
   prepAudio();
   S.endsAt = Date.now() + S.timeLeft; // baseado em Date.now()
   S.started = true; S.running = true;
@@ -1106,7 +1136,8 @@ function cfgValue(k) {
   return k === "size" ? S.cfg.size : k === "minutes" ? S.cfg.minutes : k === "goals" ? S.cfg.goals : k === "scoreA" ? S.scores.A : S.scores.B;
 }
 function setCfg(k, v) {
-  if (isNaN(v)) return;
+  if (!Number.isFinite(v)) return;
+  v = Math.trunc(v);
   if (k === "size") { S.cfg.size = clamp(v, 2, 15); saveCfg(); }
   else if (k === "minutes") setMinutes(v);
   else if (k === "goals") setGoals(v);
@@ -1119,11 +1150,14 @@ function stepper(k, min, max, label) {
     '<button class="icb" data-act="cfgStep" data-k="' + k + '" data-d="1" aria-label="Aumentar ' + label + '">' + ic("plus") + "</button></div>";
 }
 function sorteioCard(withRedraw) {
-  const n = S.roster.filter(function (p) { return p.present; }).length, w = S.cfg.size;
+  const present = S.roster.filter(function (p) { return p.present; }), w = S.cfg.size;
+  const reserves = Math.max(0, present.filter(function (p) { return p.gk; }).length - 2);
+  const n = present.length - reserves;
   let hint;
   if (n < 4) hint = "Marque pelo menos 4 presentes para sortear.";
   else if (n >= 2 * w) hint = (2 * w) + " jogam (" + w + " por time)" + (n - 2 * w ? " e " + (n - 2 * w) + " ficam na fila." : ".");
   else hint = "Com " + n + " presentes, os times ficam com " + Math.max(2, Math.floor(n / 2)) + " jogadores cada.";
+  if (reserves) hint += " Mais " + reserves + " goleiro(s) na fila específica.";
   return '<section class="card stack"><div class="split"><div><h2 class="ttl">Sorteio</h2><p class="muted" style="margin-top:2px">Ajuste conforme o campo do dia.</p></div>' + tile("shuffle", "blue") + "</div>" +
     '<div class="setrow"><div><div class="nm">Jogadores por time</div><div class="why" style="margin-top:2px">contando o goleiro</div></div>' + stepper("size", 2, 15, "jogadores por time") + "</div>" +
     '<p class="muted">' + esc(hint) + (withRedraw ? " O novo valor vale ao refazer o sorteio." : "") + "</p>" +
@@ -1242,7 +1276,7 @@ function viewMembros() {
 function swapBtn() { return ""; }
 function plRow(id, k, n, isGk) {
   const p = P(id);
-  if (!p) return "";
+  if (!p) return '<li class="pl"><span class="nm">Vaga aberta' + (isGk ? ' no gol' : '') + '</span></li>';
   return '<li><button class="pl k' + p.cat + (isGk ? " gk" : "") + '" data-act="swap" data-k="' + k + '" data-id="' + id + '" data-gk="' + (isGk ? 1 : 0) + '" aria-label="Trocar ' + esc(p.name) + ' pelo primeiro da fila">' +
     '<span class="pn">' + (isGk ? ic("shield", "i16") : n) + '</span><span class="nm">' + esc(p.name) + "</span>" +
     (S.teams.lineGk.indexOf(id) >= 0 ? '<span class="lg2" style="color:var(--tt)">gol</span>' : "") +
@@ -1250,7 +1284,7 @@ function plRow(id, k, n, isGk) {
 }
 function teamCard(k) {
   const t = S.teams[k];
-  return '<section class="tm ' + k + '"><div class="th"><span>Time ' + k + '</span><small>' + (1 + t.line.length) + " · " + S.games[k] + 'ª</small></div><ul>' +
+  return '<section class="tm ' + k + '"><div class="th"><span>Time ' + k + '</span><small>' + ([t.gk].concat(t.line).filter(Boolean).length) + " · " + S.games[k] + 'ª</small></div><ul>' +
     plRow(t.gk, k, 0, true) + t.line.map(function (id, i) { return plRow(id, k, i + 1, false); }).join("") + "</ul></section>";
 }
 function viewTimes() {
@@ -1282,7 +1316,7 @@ function viewTimes() {
     '<div class="duo">' + teamCard("A") + teamCard("B") + "</div>" +
     '<div class="legend"><span><i class="l0"></i>Pagante</span><span><i class="l1"></i>Não pagante</span><span><i class="l2"></i>Convidado</span><span><i class="l3"></i>Goleiro</span></div>' +
     '<p class="muted" style="margin-top:-6px">Toque num jogador para trocar pelo primeiro da fila.</p>' +
-    (S.queue.length ? '<div class="sech"><h2>Fila de espera</h2><span>' + S.queue.length + " jogadores</span></div>" + blocks : '<section class="card"><p class="muted">Ninguém na fila.</p></section>') +
+    (S.queue.length ? '<div class="sech"><h2>Fila de espera</h2><span>' + S.queue.length + " jogadores</span></div><p class=\"muted\">Quem sai ou chega depois vai para o fim da fila. Pagantes têm prioridade no sorteio inicial.</p>" + blocks : '<section class="card"><p class="muted">Ninguém na fila.</p></section>') +
     (S.gkq.length ? '<section class="qteam inc"><h3><span>Goleiros esperando (' + S.gkq.length + ')</span></h3><ul>' + gq + '</ul><p class="why" style="margin-top:6px">O goleiro do time que sair troca com o primeiro daqui.</p></section>' : "") +
     '<div class="acts2"><button class="btn sec" data-act="redraw">' + ic("shuffle", "i16") + " Sortear de novo</button><button class=\"btn pri\" data-act=\"tab\" data-v=\"partida\">" + ic("play") + " Ir para partida</button></div>" + sorteioCard(true);
 }
@@ -1535,7 +1569,7 @@ function syncNow(manual) {
   }).catch(function (e) {
     S.sync.state = "err"; S.sync.msg = e && e.message ? String(e.message).slice(0, 40) : "";
   }).then(function () {
-    syBusy = false; render();
+    syBusy = false; reconcile(); render();
   });
   return syPromise;
 }
