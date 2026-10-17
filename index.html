@@ -10,8 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black" />
 <meta name="apple-mobile-web-app-title" content="Fut com Cristo" />
 <link rel="manifest" href="manifest.webmanifest" />
-<link rel="icon" href="icon-192.png" />
-<link rel="apple-touch-icon" href="icon-192.png" />
+<link rel="icon" href="icon-192.png?v=2" />
+<link rel="apple-touch-icon" href="icon-192.png?v=2" />
 <style>
 :root{
   --blue:#2563EB; --blue-d:#1D4ED8; --ink:#0B0B0F; --bg:#F4F6FA; --red:#DC2626;
@@ -461,6 +461,14 @@ body{background:var(--bg0)}
 .chip[aria-pressed="true"]{color:var(--gt)}
 .mid{width:124px;height:124px}.mid .clock{font-size:31px}.mid .status{font-size:11px}
 @media (max-width:360px){.mid{width:108px;height:108px}.mid .clock{font-size:26px}}
+
+/* cronômetro grande */
+.bgrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:4px 6px}
+.mid{grid-column:1/-1;order:-1;margin:0 auto 4px;width:176px;height:176px}
+.mid .clock{font-size:46px}.mid .status{font-size:12.5px;margin-top:4px}
+.mid .rtrack,.mid .rprog{stroke-width:11}
+.bt .num{font-size:60px}
+@media (max-width:360px){.mid{width:156px;height:156px}.mid .clock{font-size:40px}}
 /* ---- Nada pode sair da tela ---- */
 html,body{overflow-x:hidden;max-width:100%}
 .shell,.sheet,.content{max-width:100%;min-width:0}
@@ -662,12 +670,12 @@ let audioCtx = null;
 function players() {
   const m = monthKey();
   return S.roster.map(function (p) {
-    return Object.assign({}, p, { cat: p.gk ? 3 : (p.kind === "guest" ? 2 : (p.paidMonth === m ? 0 : 1)) });
+    return Object.assign({}, p, { played: p.played || 0, waited: p.waited || 0, cat: p.gk ? 3 : (p.kind === "guest" ? 2 : (p.paidMonth === m ? 0 : 1)) });
   });
 }
 function P(id) { return players().filter(function (p) { return p.id === id; })[0]; }
 function updRoster(id, patch) {
-  const stamp = ("gk" in patch || "name" in patch) ? { u: Date.now() } : {};
+  const stamp = ("gk" in patch || "name" in patch || "paidMonth" in patch) ? { u: Date.now() } : {};
   S.roster = S.roster.map(function (p) { return p.id === id ? Object.assign({}, p, patch, p.kind === "member" ? stamp : {}) : p; });
   if (stamp.u) syncSoon();
 }
@@ -692,21 +700,64 @@ function notice(type, text) {
 
 /* ---------------------------------------------------------------------
    PRIORIDADE
-   1) quem jogou menos partidas no dia
-   2) categoria (Pagante > Não pagante > Convidado)
-   3) quem esperou mais rodadas
-   4) empate: sorteio aleatório
+   Nível 1: Pagantes (prioridade absoluta)
+   Nível 2: Não pagantes e Convidados, juntos e sem preferência entre si
+   Dentro do mesmo nível: 1) menos partidas no dia  2) mais rodadas esperando  3) sorteio
+   Um convidado ou não pagante nunca passa na frente de um pagante.
    --------------------------------------------------------------------- */
+function tier(p) { return p.cat === 1 || p.cat === 2 ? 1 : 0; }
+function cmpPrio(a, b) {
+  return tier(a) - tier(b) || (a.played || 0) - (b.played || 0) || (b.waited || 0) - (a.waited || 0);
+}
+function shuffle(list) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; }
+  return a;
+}
 function rank(list) {
   return list.map(function (p) { return { p: p, r: Math.random() }; })
-    .sort(function (a, b) { return (a.p.played || 0) - (b.p.played || 0) || a.p.cat - b.p.cat || b.p.waited - a.p.waited || a.r - b.r; })
+    .sort(function (a, b) { return cmpPrio(a.p, b.p) || a.r - b.r; })
     .map(function (x) { return x.p; });
 }
 
 function rankStable(list) {
   return list.map(function (p, i) { return { p: p, i: i }; })
-    .sort(function (a, b) { return (a.p.played || 0) - (b.p.played || 0) || a.p.cat - b.p.cat || b.p.waited - a.p.waited || a.i - b.i; })
+    .sort(function (a, b) { return cmpPrio(a.p, b.p) || a.i - b.i; })
     .map(function (x) { return x.p; });
+}
+/* Divide jogadores já escolhidos entre os times de `caps` ({A:n, B:m}).
+   1) Pagantes no padrão A,B,B,A  2) Não pagantes e convidados embaralhados e alternados,
+   equilibrando quantos de cada tipo ficam em cada time. */
+function mixSplit(list, caps) {
+  const keys = Object.keys(caps), out = {}, cnt = {};
+  keys.forEach(function (k) { out[k] = []; cnt[k] = { n: 0, g: 0, p: 0 }; });
+  const room = function (k) { return caps[k] - out[k].length; };
+  const pay = list.filter(function (p) { return tier(p) === 0; });
+  const nonp = shuffle(list.filter(function (p) { return p.cat === 1; }));
+  const gst = shuffle(list.filter(function (p) { return p.cat === 2; }));
+  const pat = keys.length === 2 ? [keys[0], keys[1], keys[1], keys[0]] : keys;
+  pay.forEach(function (p, i) {
+    let k = pat[i % pat.length];
+    if (room(k) <= 0) k = keys.filter(function (x) { return room(x) > 0; })[0];
+    if (k) { out[k].push(p.id); cnt[k].p++; }
+  });
+  let flip = Math.random() < 0.5 ? 0 : 1;
+  const put = function (p, f) {
+    const open = keys.filter(function (x) { return room(x) > 0; });
+    if (!open.length) return;
+    open.sort(function (x, y) { return cnt[x][f] - cnt[y][f] || cnt[x].n - cnt[y].n || room(y) - room(x); });
+    let k = open[0];
+    if (open.length > 1 && cnt[open[0]][f] === cnt[open[1]][f] && cnt[open[0]].n === cnt[open[1]].n && room(open[0]) === room(open[1])) k = open[flip++ % 2];
+    out[k].push(p.id); cnt[k][f]++; cnt[k].n++;
+  };
+  // alterna convidado/não pagante para espalhar os dois tipos nos dois times
+  const mixed = [];
+  for (let i = 0; i < Math.max(nonp.length, gst.length); i++) {
+    if (i < nonp.length) mixed.push([nonp[i], "n"]);
+    if (i < gst.length) mixed.push([gst[i], "g"]);
+  }
+  mixed.forEach(function (x) { put(x[0], x[1]); });
+  return out;
 }
 function orderQueue() {
   S.queue = rankStable(S.queue.map(function (id) { return P(id); }).filter(Boolean)).map(function (p) { return p.id; });
@@ -715,10 +766,12 @@ function orderQueue() {
 /* ===================================================================
    SORTEIO
    - 2 goleiros (marcados) por prioridade; se faltar, linha vai ao gol
-   - vagas de linha por prioridade, distribuídas A,B,B,A,A,B,B,A...
+   - vagas de linha: pagantes primeiro (A,B,B,A); depois não pagantes e convidados misturados entre os times
    =================================================================== */
 function drawTeams() {
   S.notices = [];
+  // novo sorteio = jogo novo: zera partidas e espera (estado local do dia, nunca vem da nuvem)
+  S.roster = S.roster.map(function (p) { return Object.assign({}, p, { played: 0, waited: 0 }); });
   const present = players().filter(function (p) { return p.present; });
   if (present.length < 4) {
     setNotices([{ type: "error", text: "São necessários pelo menos 4 jogadores presentes para sortear os times." }]);
@@ -746,9 +799,9 @@ function drawTeams() {
   const selected = rest.slice(0, slots);
   const waiting = rest.slice(slots);
 
-  const A = { gk: gks[0].id, line: [] }, B = { gk: gks[1].id, line: [] };
-  const pattern = ["A", "B", "B", "A"];
-  selected.forEach(function (p, i) { (pattern[i % 4] === "A" ? A.line : B.line).push(p.id); });
+  const half = Math.ceil(selected.length / 2);
+  const mix = mixSplit(selected, { A: half, B: half });
+  const A = { gk: gks[0].id, line: mix.A }, B = { gk: gks[1].id, line: mix.B };
 
   const why = {};
   gks.forEach(function (p) { why[p.id] = lineGk.indexOf(p.id) >= 0 ? "Goleiro: linha no gol (faltaram goleiros)" : "Goleiro fixo na partida"; });
@@ -757,9 +810,9 @@ function drawTeams() {
   const cutoff = selected[selected.length - 1];
   waiting.forEach(function (p) {
     if (!cutoff) why[p.id] = "Aguardando: vagas preenchidas";
+    else if (tier(p) > tier(cutoff)) why[p.id] = "Aguardando: pagantes têm prioridade";
     else if ((p.played || 0) > (cutoff.played || 0)) why[p.id] = "Aguardando: já jogou mais partidas que quem entrou";
-    else if (p.cat > cutoff.cat) why[p.id] = "Aguardando: vagas preenchidas por categoria de maior prioridade";
-    else if (p.waited < cutoff.waited) why[p.id] = "Aguardando: mesma categoria, mas com menos rodadas de espera";
+    else if ((p.waited || 0) < (cutoff.waited || 0)) why[p.id] = "Aguardando: menos rodadas de espera";
     else why[p.id] = "Aguardando: mesma prioridade, decidido no sorteio";
   });
 
@@ -834,22 +887,22 @@ function entryPlan(outs) {
   const court = [];
   ["A", "B"].forEach(function (k) { court.push(S.teams[k].gk); S.teams[k].line.forEach(function (x) { court.push(x); }); });
   const bump = function (id) { const p = P(id); return p ? Object.assign({}, p, { played: (p.played || 0) + (court.indexOf(id) >= 0 ? 1 : 0) }) : null; };
-  const pool = rankStable(S.queue.map(function (id) { const p = bump(id); return p ? Object.assign(p, { waited: p.waited + 1 }) : null; }).filter(Boolean));
+  const pool = rankStable(S.queue.map(function (id) { const p = bump(id); return p ? Object.assign(p, { waited: (p.waited || 0) + 1 }) : null; }).filter(Boolean));
   const leaving = [];
   outs.forEach(function (k) { S.teams[k].line.forEach(function (id) { const p = bump(id); if (p) leaving.push(Object.assign(p, { waited: 0 })); }); });
   const leavingR = rankStable(leaving);
   let usedOut = false;
-  const newLines = {};
-  outs.forEach(function (k) {
-    const need = S.teams[k].line.length, line = [];
-    while (line.length < need) {
-      let p = pool.shift();
-      if (!p) { p = leavingR.shift(); if (p) usedOut = true; }
-      if (!p) break;
-      line.push(p.id);
-    }
-    newLines[k] = line;
-  });
+  const caps = {};
+  let total = 0;
+  outs.forEach(function (k) { caps[k] = S.teams[k].line.length; total += caps[k]; });
+  const picks = [];
+  while (picks.length < total) {
+    let p = pool.shift();
+    if (!p) { p = leavingR.shift(); if (p) usedOut = true; }
+    if (!p) break;
+    picks.push(p);
+  }
+  const newLines = mixSplit(picks, caps);
   return { pool: pool, leavingR: leavingR, newLines: newLines, usedOut: usedOut, court: court };
 }
 function previewEntry(outs) {
@@ -890,10 +943,10 @@ function rotate(outs) {
   S.roster = S.roster.map(function (p) {
     const base = ep.court.indexOf(p.id) >= 0 ? Object.assign({}, p, { played: (p.played || 0) + 1 }) : p;
     if (entering.indexOf(p.id) >= 0 || outIds.indexOf(p.id) >= 0) return Object.assign({}, base, { waited: 0 });
-    if (oldQueue.indexOf(p.id) >= 0) return Object.assign({}, base, { waited: p.waited + 1 });
+    if (oldQueue.indexOf(p.id) >= 0) return Object.assign({}, base, { waited: (p.waited || 0) + 1 });
     return base;
   });
-  outs.forEach(function (k) { newLines[k].forEach(function (id) { why[id] = "Entrou: quem jogou menos tem prioridade"; }); });
+  outs.forEach(function (k) { newLines[k].forEach(function (id) { why[id] = "Entrou: pagantes primeiro, depois quem jogou menos"; }); });
   newQueue.forEach(function (id) { why[id] = outIds.indexOf(id) >= 0 ? "Aguardando: time que saiu, vai para o fim" : "Aguardando: ordem de prioridade da fila"; });
   ["A", "B"].filter(function (k) { return outs.indexOf(k) < 0; }).forEach(function (k) {
     S.teams[k].line.concat([S.teams[k].gk]).forEach(function (id) { why[id] = "Permanece em quadra"; });
@@ -1126,9 +1179,6 @@ function viewPresenca() {
     '<div class="stat s1"><b>' + cnt(1) + "</b><span>Não pagantes</span></div>" +
     '<div class="stat s2"><b>' + cnt(2) + "</b><span>Convidados</span></div></div>" +
     (cnt(3) ? '<p class="muted" style="margin-top:10px">+ ' + cnt(3) + (cnt(3) === 1 ? " goleiro" : " goleiros") + " (isentos de mensalidade)</p>" : "") +
-    '<div class="sep" style="margin-top:14px"></div>' +
-    '<button class="link' + (S.showRules ? " open" : "") + '" data-act="rules" aria-expanded="' + S.showRules + '">Como funciona a prioridade?' + ic("down") + "</button>" +
-    (S.showRules ? '<div class="rules muted"><p>1. Entra primeiro quem jogou menos partidas no dia. Quem já jogou dá lugar a quem ainda não jogou (convidados incluídos).</p><p>2. Com o mesmo número de partidas: Pagantes, depois Não pagantes e por último Convidados.</p><p>3. Se ainda empatar, entra quem esperou mais rodadas; depois, um sorteio decide.</p><p>4. Goleiros são isentos de mensalidade e ficam fixos nas partidas. Com mais de 2 goleiros, o goleiro do time que sai troca com o que está esperando.</p><p>5. Quem chega atrasado entra na fila, seguindo a mesma regra.</p><p>6. Um time que jogou 3 partidas seguidas sai, mesmo vencendo, se houver outro time completo esperando. Em empate: com 1 time esperando sai só o de 3 partidas; com 2 ou mais esperando, saem os dois.</p></div>' : "") +
     "</section>" +
 
     sorteioCard(false) +
@@ -1139,8 +1189,7 @@ function viewPresenca() {
     '<button class="btn pri full" data-act="addGuest">' + ic("plus") + " Adicionar</button></section>" +
 
     '<section class="card"><div class="split" style="margin-bottom:14px"><h2 class="ttl">Quem veio hoje?</h2>' + tile("checkc", "gray") + "</div>" +
-    '<input class="inp" id="search" data-bind="search" placeholder="Buscar nome" value="' + esc(S.search) + '" autocomplete="off" aria-label="Buscar nome">' +
-    '<div class="row2" style="margin:12px 0 8px"><button class="btn sec sm" data-act="allOn">Marcar todos</button><button class="btn sec sm" data-act="allOff">Limpar</button></div>' +
+    '<div class="row2" style="margin:0 0 8px"><button class="btn sec sm" data-act="allOn">Marcar todos</button><button class="btn sec sm" data-act="allOff">Limpar</button></div>' +
     (pl.length === 0
       ? emptyState("users", "Nenhum membro cadastrado ainda. Cadastre quem joga com a gente.", '<button class="btn pri" data-act="tab" data-v="membros">' + ic("userplus") + " Cadastrar membros</button>")
       : (rows ? "<ul>" + rows + "</ul>" : emptyState("search", "Ninguém encontrado com esse nome.", ""))) +
